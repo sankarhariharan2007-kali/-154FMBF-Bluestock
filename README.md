@@ -1,6 +1,6 @@
 # Bluestock MF Analytics Capstone
 
-Mutual Fund analytics capstone project — ETL, EDA, performance metrics, dashboard and advanced analytics for Bluestock Fintech.
+Mutual Fund analytics project — ETL, EDA, performance metrics, dashboard and advanced analytics for Bluestock Fintech.
 
 ## Objectives
 - Ingest and clean 10 mutual fund datasets (fund master, NAV history, AUM, SIP inflows, transactions, portfolio holdings, benchmarks).
@@ -78,3 +78,7 @@ jupyter nbconvert --to notebook --execute notebooks/05_advanced_analytics.ipynb
 
 ## Author
 Hariharan S — Dual Degree (B.Tech + M.Tech) CSE, IIITDM Kurnool
+This work was completed as part of the Bluestock™ Ltd Mutual Fund Analytics Internship Project.
+All datasets, cleaned tables, notebooks, SQL scripts, and generated figures are available in the
+accompanying project repository and remain the intellectual property of Bluestock™ Ltd.
+
