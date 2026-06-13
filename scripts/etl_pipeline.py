@@ -1,301 +1,124 @@
 """
-data_ingestion.py
-=================
-Day 1 – Mutual Fund Analytics Project
-Tasks covered:
-  3. Load all 10 CSV datasets, print shape / dtypes / head, note anomalies
-  6. Explore fund_master: unique fund houses, categories, sub-categories, risk grades
-  7. Validate AMFI codes – confirm every code in fund_master exists in nav_history
-
-Run: python3 data_ingestion.py
+Bluestock MF Analytics - Full ETL Pipeline
+Cleans all 10 CSVs, loads into SQLite, validates row counts.
 """
-
-import os
 import pandas as pd
 import numpy as np
-from datetime import datetime
+from pathlib import Path
+from sqlalchemy import create_engine
+import warnings
+warnings.filterwarnings('ignore')
 
-RAW_DIR       = "data/raw"
-PROCESSED_DIR = "data/processed"
-REPORT_PATH   = "reports/data_quality_summary.txt"
+ROOT      = Path(__file__).parent.parent
+RAW       = ROOT / "data" / "raw"
+PROCESSED = ROOT / "data" / "processed"
+DB_PATH   = ROOT / "data" / "db" / "bluestock_mf.db"
+PROCESSED.mkdir(parents=True, exist_ok=True)
 
-os.makedirs(PROCESSED_DIR, exist_ok=True)
-os.makedirs("reports", exist_ok=True)
+engine = create_engine(f"sqlite:///{DB_PATH}")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# HELPERS
-# ─────────────────────────────────────────────────────────────────────────────
+# ── 1. Fund Master ────────────────────────────────────────────────────────────
+fm = pd.read_csv(RAW / "01_fund_master.csv")
+fm["launch_date"] = pd.to_datetime(fm["launch_date"], errors="coerce")
+fm["amfi_code"] = fm["amfi_code"].astype(int)
+fm.to_csv(PROCESSED / "clean_fund_master.csv", index=False)
+fm.to_sql("dim_fund", engine, if_exists="replace", index=False)
+print(f"fund_master:          {len(fm):>6} rows")
 
-DIVIDER = "=" * 72
+# ── 2. NAV History ────────────────────────────────────────────────────────────
+nav = pd.read_csv(RAW / "02_nav_history.csv", parse_dates=["date"])
+nav = nav.sort_values(["amfi_code", "date"]).drop_duplicates(["amfi_code","date"])
+nav = nav[nav["nav"] > 0]
 
-def banner(title: str) -> None:
-    print(f"\n{DIVIDER}")
-    print(f"  {title}")
-    print(DIVIDER)
+# forward-fill weekends/holidays
+all_dates = pd.date_range(nav["date"].min(), nav["date"].max(), freq="D")
+codes = nav["amfi_code"].unique()
+idx   = pd.MultiIndex.from_product([codes, all_dates], names=["amfi_code","date"])
+nav   = (nav.set_index(["amfi_code","date"])
+             .reindex(idx).groupby(level=0)["nav"].ffill()
+             .reset_index())
+nav = nav.dropna(subset=["nav"])
 
+# daily returns
+nav = nav.sort_values(["amfi_code","date"])
+nav["daily_return_pct"] = nav.groupby("amfi_code")["nav"].pct_change().round(6)
 
-def section(title: str) -> None:
-    print(f"\n{'─'*60}")
-    print(f"  {title}")
-    print('─'*60)
+nav.to_csv(PROCESSED / "clean_nav_history.csv", index=False)
+nav.to_sql("fact_nav", engine, if_exists="replace", index=False)
+print(f"nav_history:          {len(nav):>6} rows  (after ffill)")
 
+# ── 3. AUM by Fund House ──────────────────────────────────────────────────────
+aum = pd.read_csv(RAW / "03_aum_by_fund_house.csv")
+aum["aum_lakh_crore"] = pd.to_numeric(aum["aum_lakh_crore"], errors="coerce")
+aum.to_csv(PROCESSED / "clean_aum_by_fund_house.csv", index=False)
+aum.to_sql("fact_aum", engine, if_exists="replace", index=False)
+print(f"aum_by_fund_house:    {len(aum):>6} rows")
 
-def anomaly_check(df: pd.DataFrame, name: str) -> list[str]:
-    """Return a list of anomaly strings found in the dataframe."""
-    anomalies = []
+# ── 4. Monthly SIP Inflows ────────────────────────────────────────────────────
+sip = pd.read_csv(RAW / "04_monthly_sip_inflows.csv", parse_dates=["month"])
+sip.to_csv(PROCESSED / "clean_monthly_sip_inflows.csv", index=False)
+sip.to_sql("fact_sip_inflows", engine, if_exists="replace", index=False)
+print(f"monthly_sip_inflows:  {len(sip):>6} rows")
 
-    # Missing values
-    nulls = df.isnull().sum()
-    null_cols = nulls[nulls > 0]
-    if not null_cols.empty:
-        for col, cnt in null_cols.items():
-            pct = cnt / len(df) * 100
-            anomalies.append(f"  ⚠  Nulls in '{col}': {cnt} ({pct:.1f}%)")
+# ── 5. Category Inflows ───────────────────────────────────────────────────────
+cat_inf = pd.read_csv(RAW / "05_category_inflows.csv", parse_dates=["month"])
+cat_inf.to_csv(PROCESSED / "clean_category_inflows.csv", index=False)
+cat_inf.to_sql("fact_category_inflows", engine, if_exists="replace", index=False)
+print(f"category_inflows:     {len(cat_inf):>6} rows")
 
-    # Duplicate rows
-    dup_count = df.duplicated().sum()
-    if dup_count > 0:
-        anomalies.append(f"  ⚠  Duplicate rows: {dup_count}")
+# ── 6. Industry Folio Count ───────────────────────────────────────────────────
+folio = pd.read_csv(RAW / "06_industry_folio_count.csv", parse_dates=["month"])
+folio.to_csv(PROCESSED / "clean_industry_folio_count.csv", index=False)
+folio.to_sql("fact_folio_count", engine, if_exists="replace", index=False)
+print(f"industry_folio_count: {len(folio):>6} rows")
 
-    # Numeric columns: negatives where unexpected, outliers
-    num_cols = df.select_dtypes(include=[np.number]).columns
-    for col in num_cols:
-        neg = (df[col] < 0).sum()
-        if neg > 0:
-            anomalies.append(f"  ⚠  Negative values in '{col}': {neg} rows")
+# ── 7. Scheme Performance ─────────────────────────────────────────────────────
+perf = pd.read_csv(RAW / "07_scheme_performance.csv")
+numeric_cols = [c for c in perf.columns if "pct" in c or c in
+                ["alpha","beta","sharpe_ratio","sortino_ratio","std_dev_ann_pct","aum_crore"]]
+for c in numeric_cols:
+    perf[c] = pd.to_numeric(perf[c], errors="coerce")
+perf = perf[perf["expense_ratio_pct"].between(0.1, 2.5, inclusive="both") | perf["expense_ratio_pct"].isna()]
+perf.to_csv(PROCESSED / "clean_scheme_performance.csv", index=False)
+perf.to_sql("fact_performance", engine, if_exists="replace", index=False)
+print(f"scheme_performance:   {len(perf):>6} rows")
 
-        q1  = df[col].quantile(0.25)
-        q3  = df[col].quantile(0.75)
-        iqr = q3 - q1
-        if iqr > 0:
-            outliers = ((df[col] < q1 - 3 * iqr) | (df[col] > q3 + 3 * iqr)).sum()
-            if outliers > 0:
-                anomalies.append(f"  ℹ  Potential outliers in '{col}': {outliers} rows (IQR×3 rule)")
+# ── 8. Investor Transactions ──────────────────────────────────────────────────
+txn = pd.read_csv(RAW / "08_investor_transactions.csv", parse_dates=["transaction_date"])
+txn["transaction_type"] = txn["transaction_type"].str.strip().str.title()
+txn = txn[txn["amount_inr"] > 0]
+txn = txn[txn["kyc_status"].isin(["Verified","Pending","Rejected"])]
+txn.to_csv(PROCESSED / "clean_investor_transactions.csv", index=False)
+txn.to_sql("fact_transactions", engine, if_exists="replace", index=False)
+print(f"investor_transactions:{len(txn):>6} rows")
 
-    if not anomalies:
-        anomalies.append("  ✓  No anomalies detected")
+# ── 9. Portfolio Holdings ─────────────────────────────────────────────────────
+port = pd.read_csv(RAW / "09_portfolio_holdings.csv", parse_dates=["portfolio_date"])
+port.to_csv(PROCESSED / "clean_portfolio_holdings.csv", index=False)
+port.to_sql("fact_portfolio", engine, if_exists="replace", index=False)
+print(f"portfolio_holdings:   {len(port):>6} rows")
 
-    return anomalies
+# ── 10. Benchmark Indices ─────────────────────────────────────────────────────
+bench = pd.read_csv(RAW / "10_benchmark_indices.csv", parse_dates=["date"])
+bench = bench.sort_values(["index_name","date"]).drop_duplicates()
+bench["daily_return_pct"] = bench.groupby("index_name")["close_value"].pct_change().round(6)
+bench.to_csv(PROCESSED / "clean_benchmark_indices.csv", index=False)
+bench.to_sql("fact_benchmarks", engine, if_exists="replace", index=False)
+print(f"benchmark_indices:    {len(bench):>6} rows")
 
+# ── Dim Date ──────────────────────────────────────────────────────────────────
+dates = pd.date_range("2022-01-01", "2025-12-31", freq="D")
+dim_date = pd.DataFrame({
+    "date"       : dates,
+    "year"       : dates.year,
+    "quarter"    : dates.quarter,
+    "month"      : dates.month,
+    "month_name" : dates.month_name(),
+    "week"       : dates.isocalendar().week.astype(int),
+    "day_of_week": dates.day_name(),
+    "is_weekend" : dates.dayofweek >= 5,
+})
+dim_date.to_sql("dim_date", engine, if_exists="replace", index=False)
+print(f"dim_date:             {len(dim_date):>6} rows")
 
-# ─────────────────────────────────────────────────────────────────────────────
-# TASK 3 – Load all 10 datasets
-# ─────────────────────────────────────────────────────────────────────────────
-
-DATASETS = {
-    "fund_master"           : "fund_master.csv",
-    "nav_history"           : "nav_history.csv",
-    "portfolio_holdings"    : "portfolio_holdings.csv",
-    "aum_history"           : "aum_history.csv",
-    "sip_data"              : "sip_data.csv",
-    "returns_summary"       : "returns_summary.csv",
-    "expense_ratio"         : "expense_ratio.csv",
-    "benchmark_index"       : "benchmark_index.csv",
-    "dividend_history"      : "dividend_history.csv",
-    "investor_transactions" : "investor_transactions.csv",
-}
-
-banner("TASK 3 – Loading 10 CSV Datasets")
-
-dataframes: dict[str, pd.DataFrame] = {}
-all_anomalies: dict[str, list[str]] = {}
-
-for key, filename in DATASETS.items():
-    filepath = os.path.join(RAW_DIR, filename)
-    section(f"[{key}]  ←  {filename}")
-
-    try:
-        df = pd.read_csv(filepath)
-        dataframes[key] = df
-
-        # ── Shape ─────────────────────────────────────────────────────────
-        print(f"\n  shape  : {df.shape}   ({df.shape[0]:,} rows × {df.shape[1]} cols)")
-
-        # ── dtypes ────────────────────────────────────────────────────────
-        print(f"\n  dtypes :")
-        for col, dtype in df.dtypes.items():
-            null_pct = df[col].isnull().mean() * 100
-            print(f"    {col:<30} {str(dtype):<12}  nulls: {null_pct:.1f}%")
-
-        # ── Head (3 rows) ─────────────────────────────────────────────────
-        print(f"\n  head(3) :\n{df.head(3).to_string(index=False)}")
-
-        # ── Anomalies ─────────────────────────────────────────────────────
-        anomalies = anomaly_check(df, key)
-        all_anomalies[key] = anomalies
-        print(f"\n  anomalies :")
-        for a in anomalies:
-            print(a)
-
-    except FileNotFoundError:
-        print(f"  ERROR: File not found – {filepath}")
-        all_anomalies[key] = ["  ✗  File not found"]
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TASK 6 – Fund Master Exploration
-# ─────────────────────────────────────────────────────────────────────────────
-
-banner("TASK 6 – Fund Master Exploration")
-
-fm = dataframes["fund_master"]
-
-section("Unique Fund Houses")
-fund_houses = fm["fund_house"].unique()
-print(f"\n  Total unique fund houses: {len(fund_houses)}")
-for i, fh in enumerate(sorted(fund_houses), 1):
-    count = (fm["fund_house"] == fh).sum()
-    print(f"  {i:>2}. {fh:<35}  ({count} schemes)")
-
-section("Unique Categories")
-cats = fm["category"].value_counts()
-print(f"\n  {'Category':<30} {'Count':>8}")
-print(f"  {'─'*40}")
-for cat, cnt in cats.items():
-    print(f"  {cat:<30} {cnt:>8}")
-
-section("Sub-categories by Category")
-for cat in fm["category"].unique():
-    sub = fm[fm["category"] == cat]["sub_category"].value_counts()
-    print(f"\n  {cat}:")
-    for s, c in sub.items():
-        print(f"    → {s:<35} {c:>4} schemes")
-
-section("Risk Grade Distribution")
-risk = fm["risk_grade"].value_counts()
-print(f"\n  {'Risk Grade':<25} {'Count':>8} {'% of AUM-equivalent':>22}")
-print(f"  {'─'*57}")
-for r, c in risk.items():
-    bar = "█" * (c // 2)
-    print(f"  {r:<25} {c:>8}   {bar}")
-
-section("AMFI Scheme Code Structure")
-print("""
-  AMFI (Association of Mutual Funds in India) scheme codes are unique
-  6-digit integers assigned to each mutual fund scheme variant.
-
-  Code anatomy:
-  ┌──────────────────────────────────────────────────────────┐
-  │  e.g.  125497  ─  HDFC Top 100 Fund – Direct – Growth   │
-  │         ↑                                                 │
-  │         6-digit numeric identifier (AMFI-assigned)       │
-  │                                                           │
-  │  Each plan × option gets a SEPARATE code:               │
-  │    • Direct  Growth  → distinct code                     │
-  │    • Direct  IDCW    → different code                    │
-  │    • Regular Growth  → different code again              │
-  └──────────────────────────────────────────────────────────┘
-
-  Code range in this dataset:
-""")
-print(f"    Min code : {fm['scheme_code'].min()}")
-print(f"    Max code : {fm['scheme_code'].max()}")
-print(f"    Total    : {fm['scheme_code'].nunique()} unique codes")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# TASK 7 – AMFI Code Validation
-# ─────────────────────────────────────────────────────────────────────────────
-
-banner("TASK 7 – AMFI Code Validation")
-
-nh = dataframes["nav_history"]
-
-master_codes = set(fm["scheme_code"].unique())
-nav_codes    = set(nh["scheme_code"].unique())
-
-codes_in_both      = master_codes & nav_codes
-codes_only_master  = master_codes - nav_codes   # present in master, no NAV data
-codes_only_nav     = nav_codes - master_codes   # orphan NAV entries
-
-section("Validation Results")
-print(f"""
-  Total codes in fund_master     : {len(master_codes):>6}
-  Total codes in nav_history     : {len(nav_codes):>6}
-  Codes present in BOTH          : {len(codes_in_both):>6}   ← healthy
-  Codes in master but NOT in NAV : {len(codes_only_master):>6}   ← coverage gap
-  Codes in NAV but NOT in master : {len(codes_only_nav):>6}   ← orphan entries
-""")
-
-if codes_only_master:
-    print(f"  Codes missing from nav_history (first 10):")
-    for c in sorted(codes_only_master)[:10]:
-        row = fm[fm["scheme_code"] == c].iloc[0]
-        print(f"    {c}  –  {row['scheme_name']}")
-
-if codes_only_nav:
-    print(f"\n  Orphan codes in nav_history (first 10):")
-    for c in sorted(codes_only_nav)[:10]:
-        print(f"    {c}")
-
-section("NAV History – Date Coverage")
-nh["date"] = pd.to_datetime(nh["date"])
-print(f"""
-  Date range  : {nh['date'].min().date()}  →  {nh['date'].max().date()}
-  Total rows  : {len(nh):,}
-  Avg rows/scheme : {len(nh) / nh['scheme_code'].nunique():.1f}
-""")
-
-
-# ─────────────────────────────────────────────────────────────────────────────
-# DATA QUALITY SUMMARY REPORT
-# ─────────────────────────────────────────────────────────────────────────────
-
-banner("DATA QUALITY SUMMARY REPORT")
-
-summary_lines = [
-    "Mutual Fund Analytics – Data Quality Summary",
-    f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
-    "=" * 72,
-    "",
-    "DATASET OVERVIEW",
-    "-" * 40,
-]
-
-for key in DATASETS:
-    if key in dataframes:
-        df = dataframes[key]
-        null_total = df.isnull().sum().sum()
-        dup_total  = df.duplicated().sum()
-        summary_lines.append(f"  {key:<28} rows={df.shape[0]:>6}  cols={df.shape[1]:>2}  "
-                             f"nulls={null_total:>4}  dups={dup_total:>3}")
-
-summary_lines += [
-    "",
-    "ANOMALIES PER DATASET",
-    "-" * 40,
-]
-for key, anoms in all_anomalies.items():
-    summary_lines.append(f"\n  [{key}]")
-    summary_lines.extend(anoms)
-
-summary_lines += [
-    "",
-    "AMFI CODE VALIDATION",
-    "-" * 40,
-    f"  fund_master codes   : {len(master_codes)}",
-    f"  nav_history codes   : {len(nav_codes)}",
-    f"  Codes in both       : {len(codes_in_both)}",
-    f"  Master w/o NAV data : {len(codes_only_master)}",
-    f"  Orphan NAV codes    : {len(codes_only_nav)}",
-    "",
-    "OVERALL ASSESSMENT",
-    "-" * 40,
-    "  • fund_master is the canonical source of scheme metadata.",
-    "  • nav_history covers a 40-scheme subset (expected for Day 1 scope).",
-    "  • No critical nulls or duplicates in primary keys.",
-    "  • Recommend joining on scheme_code with INNER JOIN for analysis.",
-    "  • Numeric columns pass range checks; no negative NAVs detected.",
-    "  • Date columns require pd.to_datetime() conversion before analysis.",
-]
-
-report_text = "\n".join(summary_lines)
-print(report_text)
-
-with open(REPORT_PATH, "w") as f:
-    f.write(report_text)
-
-print(f"\n\n  ✓  Report saved → {REPORT_PATH}")
-print(f"\n{DIVIDER}")
-print("  Day 1 data ingestion complete.")
-print(DIVIDER)
+print("\nETL pipeline complete. DB at:", DB_PATH)

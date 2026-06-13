@@ -1,0 +1,42 @@
+BLUESTOCK MF ANALYTICS - DATA QUALITY SUMMARY
+=======================================================
+
+Dataset                   Raw Rows  Clean Rows  Nulls(raw)  Dups(raw)
+----------------------------------------------------------------------
+fund_master                     40           -           0          0
+nav_history                  46000       64320           0          0
+aum_by_fund_house               90          90           0          0
+monthly_sip_inflows             48          48          12          0
+category_inflows               144         144           0          0
+industry_folio_count            21          21           0          0
+scheme_performance              40          40           0          0
+investor_transactions        32778       32778           0          0
+portfolio_holdings             322         322           0          0
+benchmark_indices             8050        8050           0          0
+
+AMFI CODE VALIDATION
+------------------------------
+Fund master codes : 40
+NAV history codes : 40
+Codes missing from NAV history: 0
+Result: PASS - all fund_master codes present in nav_history
+
+FUND MASTER OVERVIEW
+------------------------------
+Fund Houses (10): Aditya Birla Sun Life MF, Axis Mutual Fund, DSP Mutual Fund, HDFC Mutual Fund, ICICI Prudential MF, Kotak Mahindra MF, Mirae Asset MF, Nippon India MF, SBI Mutual Fund, UTI Mutual Fund
+Categories (2): Debt, Equity
+Sub-Categories (12): ELSS, Flexi Cap, Gilt, Index, Index/ETF, Large & Mid Cap, Large Cap, Liquid, Mid Cap, Short Duration, Small Cap, Value
+Risk Grades: High, Low, Moderate, Moderately High, Very High
+
+CLEANING NOTES
+------------------------------
+- nav_history: forward-filled to a continuous daily date range per fund (weekends/holidays); negative/zero NAVs removed.
+- investor_transactions: transaction_type standardised (Sip/Lumpsum/Redemption); amount_inr > 0 enforced; kyc_status validated.
+- scheme_performance: numeric columns coerced; expense_ratio_pct constrained to 0.1-2.5%.
+- benchmark_indices: sorted by index/date, duplicates dropped, daily returns computed.
+
+ANOMALIES NOTED
+------------------------------
+- nav_history grows from 46,000 to 64,320 rows after reindexing to a full daily calendar and forward-filling.
+- No anomalies found in fund_master AMFI codes vs nav_history.
+- All other datasets loaded without structural issues.
