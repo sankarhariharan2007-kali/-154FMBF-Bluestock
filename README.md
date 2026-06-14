@@ -1,4 +1,4 @@
-# Bluestock MF Analytics Capstone
+# Bluestock MF Analytics 
 
 Mutual Fund analytics project — ETL, EDA, performance metrics, dashboard and advanced analytics for Bluestock Fintech.
 
